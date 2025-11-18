@@ -1,8 +1,14 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+from bson import ObjectId
 
-app = FastAPI()
+from database import db, create_document, get_documents
+from schemas import Person, Photo, Tag
+
+app = FastAPI(title="Family Tree API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,17 +18,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+# Helpers
+class PersonCreate(Person):
+    pass
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+class PhotoCreate(Photo):
+    pass
+
+class IDModel(BaseModel):
+    id: str
+
+@app.get("/")
+def root():
+    return {"message": "Family Tree Backend Running"}
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
@@ -31,39 +42,109 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
+            response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
+            response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections
                 response["database"] = "✅ Connected & Working"
+                response["connection_status"] = "Connected"
             except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+                response["database"] = f"⚠️ Connected but Error: {str(e)[:80]}"
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            response["database"] = "⚠️ Available but not initialized"
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
+        response["database"] = f"❌ Error: {str(e)[:80]}"
     return response
 
+# Persons
+@app.post("/api/persons", response_model=IDModel)
+def create_person(person: PersonCreate):
+    try:
+        inserted_id = create_document("person", person)
+        return {"id": inserted_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/persons")
+def list_persons():
+    try:
+        docs = get_documents("person")
+        # Convert ObjectId to string
+        for d in docs:
+            d["_id"] = str(d["_id"])
+        return docs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Photos
+@app.post("/api/photos", response_model=IDModel)
+def create_photo(photo: PhotoCreate):
+    try:
+        inserted_id = create_document("photo", photo)
+        return {"id": inserted_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/photos")
+def list_photos():
+    try:
+        docs = get_documents("photo")
+        for d in docs:
+            d["_id"] = str(d["_id"])
+        return docs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Seed example data
+@app.post("/api/seed")
+def seed_example():
+    try:
+        # Only seed if empty
+        has_people = len(get_documents("person", {}, 1)) > 0
+        has_photos = len(get_documents("photo", {}, 1)) > 0
+        if has_people and has_photos:
+            return {"status": "ok", "message": "Already seeded"}
+        # Create persons
+        people_ids = []
+        john_id = create_document(
+            "person",
+            Person(full_name="John Carter", relation="Grandfather", birth_year=1942,
+                   photo_url="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=600&q=80&auto=format&fit=crop")
+        )
+        people_ids.append(john_id)
+        mary_id = create_document(
+            "person",
+            Person(full_name="Mary Carter", relation="Grandmother", birth_year=1945,
+                   photo_url="https://images.unsplash.com/photo-1547425260-76bcadfb4f2c?w=600&q=80&auto=format&fit=crop")
+        )
+        people_ids.append(mary_id)
+        alice_id = create_document(
+            "person",
+            Person(full_name="Alice Carter", relation="Mother", birth_year=1975,
+                   photo_url="https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=600&q=80&auto=format&fit=crop")
+        )
+        people_ids.append(alice_id)
+        # Create photo with tags
+        tags = [
+            {"person_id": john_id, "x": 0.28, "y": 0.55, "label": "John"},
+            {"person_id": mary_id, "x": 0.62, "y": 0.52, "label": "Mary"},
+            {"person_id": alice_id, "x": 0.45, "y": 0.40, "label": "Alice"},
+        ]
+        create_document(
+            "photo",
+            Photo(
+                title="Family Reunion 2001",
+                url="https://images.unsplash.com/photo-1487412947147-5cebf100ffc2?w=1600&q=80&auto=format&fit=crop",
+                tags=tags  # type: ignore
+            )
+        )
+        return {"status": "ok", "people": people_ids}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
